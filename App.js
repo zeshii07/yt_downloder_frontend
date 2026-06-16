@@ -14,7 +14,7 @@ import {
   StatusBar,
   Dimensions,
 } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 
 const BACKEND_URL = 'https://ytdownlodbackend-production.up.railway.app';
