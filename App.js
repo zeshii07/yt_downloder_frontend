@@ -22,43 +22,31 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // ── Design Tokens ─────────────────────────────────────────────
 const T = {
-  // Backgrounds
   bg:         '#080810',
   surface:    '#0F0F1A',
   card:       '#141422',
   cardBorder: '#1E1E32',
   inputBg:    '#0C0C18',
-
-  // Accent — deep electric red (YouTube energy, not cliché green)
   red:        '#FF3B5C',
   redDim:     '#FF3B5C18',
   redBorder:  '#FF3B5C35',
-  redGlow:    '#FF3B5C08',
-
-  // Secondary accent — cool silver-blue for quality badges
   blue:       '#4D9EFF',
   blueDim:    '#4D9EFF15',
   blueBorder: '#4D9EFF35',
-
-  // Success
   green:      '#34D399',
   greenDim:   '#34D39918',
-
-  // Text
-  t1:         '#F2F0FF',   // primary
-  t2:         '#8A88A8',   // secondary
-  t3:         '#3A3858',   // muted / placeholder
-
-  // Utility
+  t1:         '#F2F0FF',
+  t2:         '#8A88A8',
+  t3:         '#3A3858',
   divider:    '#1A1A2E',
   white:      '#FFFFFF',
 };
 
 // ── Helpers ───────────────────────────────────────────────────
 const qualityColor = (q) => {
-  if (q === 'best')  return { bg: T.greenDim,  border: T.green  + '40', text: T.green };
-  if (q === 'audio') return { bg: T.redDim,    border: T.red    + '40', text: T.red   };
-  return               { bg: T.blueDim,   border: T.blue   + '40', text: T.blue  };
+  if (q === 'best')  return { bg: T.greenDim, border: T.green + '40', text: T.green };
+  if (q === 'audio') return { bg: T.redDim,   border: T.red   + '40', text: T.red   };
+  return               { bg: T.blueDim,  border: T.blue  + '40', text: T.blue  };
 };
 
 const qualityLabel = (q) => {
@@ -88,17 +76,17 @@ const Tag = ({ children }) => (
 
 // ── Main App ──────────────────────────────────────────────────
 export default function App() {
-  const [url, setUrl]               = useState('');
-  const [info, setInfo]             = useState(null);
-  const [loading, setLoading]       = useState(false);
-  const [dlQuality, setDlQuality]   = useState(null);
-  const [error, setError]           = useState('');
-  const [success, setSuccess]       = useState('');
-  const [dlState, setDlState]       = useState('idle'); // idle | downloading | saving | done
+  const [url, setUrl]             = useState('');
+  const [info, setInfo]           = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [dlQuality, setDlQuality] = useState(null);
+  const [error, setError]         = useState('');
+  const [success, setSuccess]     = useState('');
+  const [dlState, setDlState]     = useState('idle'); // idle | downloading | saving | done
 
-  const fadeAnim   = useRef(new Animated.Value(0)).current;
-  const slideAnim  = useRef(new Animated.Value(24)).current;
-  const pulseAnim  = useRef(new Animated.Value(1)).current;
+  const fadeAnim  = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(24)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
 
   const showCard = () => {
     Animated.parallel([
@@ -110,7 +98,7 @@ export default function App() {
   const startPulse = () => {
     Animated.loop(
       Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 0.6, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 0.5, duration: 700, useNativeDriver: true }),
         Animated.timing(pulseAnim, { toValue: 1,   duration: 700, useNativeDriver: true }),
       ])
     ).start();
@@ -125,11 +113,12 @@ export default function App() {
     setInfo(null);
     setUrl('');
     setDlState('idle');
+    setSuccess('');
     fadeAnim.setValue(0);
     slideAnim.setValue(24);
   };
 
-  // ── Fetch info ──
+  // ── Fetch Info ──
   const handleGetInfo = async () => {
     setError('');
     setSuccess('');
@@ -138,7 +127,7 @@ export default function App() {
     slideAnim.setValue(24);
 
     if (!url.trim()) {
-      setError('Paste a YouTube link first.');
+      setError('Paste a video link first.');
       return;
     }
 
@@ -150,7 +139,10 @@ export default function App() {
         body:    JSON.stringify({ url }),
       });
       const data = await res.json();
-      if (!res.ok) { setError(data.error || 'Could not load video. Check the link.'); return; }
+      if (!res.ok) {
+        setError(data.error || 'Could not load video. Check the link.');
+        return;
+      }
       setInfo(data);
       showCard();
     } catch {
@@ -165,7 +157,8 @@ export default function App() {
     setError('');
     setSuccess('');
 
-    const { status } = await MediaLibrary.requestPermissionsAsync();
+    // Request write permission upfront — reduces per-file modify popups
+    const { status } = await MediaLibrary.requestPermissionsAsync(true);
     if (status !== 'granted') {
       Alert.alert('Permission needed', 'Allow media access to save downloads.');
       return;
@@ -176,12 +169,13 @@ export default function App() {
     startPulse();
 
     try {
-      const sanitized  = info.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-      const ext        = quality === 'audio' ? 'mp3' : 'mp4';
-      const filename   = `${sanitized}_${quality}.${ext}`;
-      const dest       = FileSystem.documentDirectory + filename;
-      const dlUrl      = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
+      const sanitized = info.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      const ext       = quality === 'audio' ? 'mp3' : 'mp4';
+      const filename  = `${sanitized}_${quality}.${ext}`;
+      const dest      = FileSystem.documentDirectory + filename;
+      const dlUrl     = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
 
+      // Download file
       const result = await FileSystem.downloadAsync(dlUrl, dest);
 
       if (result.status !== 200) {
@@ -190,17 +184,22 @@ export default function App() {
       }
 
       setDlState('saving');
+
+      // Save to media library
       const asset = await MediaLibrary.createAssetAsync(result.uri);
-      const album = await MediaLibrary.getAlbumAsync('YTDownloader');
+      const album = await MediaLibrary.getAlbumAsync('Video Downloader');
       if (!album) {
-        await MediaLibrary.createAlbumAsync('YTDownloader', asset, false);
+        await MediaLibrary.createAlbumAsync('Video Downloader', asset, false);
       } else {
         await MediaLibrary.addAssetsToAlbumAsync([asset], album.id, false);
       }
 
+      // Clean up temp file
+      await FileSystem.deleteAsync(result.uri, { idempotent: true });
+
       setDlState('done');
-      setSuccess('Saved to your gallery in "YTDownloader" album.');
-      setTimeout(reset, 3000);
+      setSuccess('Saved to your gallery in "Video Downloader" album.');
+      setTimeout(reset, 3500);
 
     } catch (e) {
       setError(`Download failed: ${e.message}`);
@@ -226,36 +225,33 @@ export default function App() {
 
         {/* ── Header ── */}
         <View style={st.header}>
-          {/* Logo mark */}
           <View style={st.logoRow}>
             <View style={st.logoBox}>
               <Text style={st.logoIcon}>▶</Text>
             </View>
             <View>
-              <Text style={st.logoName}>YT Downloader</Text>
-              <Text style={st.logoSub}>Save videos to your phone</Text>
+              <Text style={st.logoName}>Video Downloader</Text>
+              <Text style={st.logoSub}>Download from any platform</Text>
             </View>
           </View>
         </View>
 
         {/* ── Input Card ── */}
         <View style={st.card}>
-          <Text style={st.fieldLabel}>YouTube link</Text>
-          <View style={st.inputRow}>
-            <TextInput
-              style={st.input}
-              placeholder="https://youtube.com/watch?v=..."
-              placeholderTextColor={T.t3}
-              value={url}
-              onChangeText={setUrl}
-              keyboardType="url"
-              autoCapitalize="none"
-              autoCorrect={false}
-              selectionColor={T.red}
-              returnKeyType="go"
-              onSubmitEditing={handleGetInfo}
-            />
-          </View>
+          <Text style={st.fieldLabel}>Video link</Text>
+          <TextInput
+            style={st.input}
+            placeholder="Paste any video link..."
+            placeholderTextColor={T.t3}
+            value={url}
+            onChangeText={setUrl}
+            keyboardType="url"
+            autoCapitalize="none"
+            autoCorrect={false}
+            selectionColor={T.red}
+            returnKeyType="go"
+            onSubmitEditing={handleGetInfo}
+          />
           <TouchableOpacity
             style={[st.primaryBtn, (loading && !info) && st.btnBusy]}
             onPress={handleGetInfo}
@@ -268,6 +264,16 @@ export default function App() {
             }
           </TouchableOpacity>
         </View>
+
+        {/* ── Supported Platforms ── */}
+        {!info && !loading && (
+          <View style={st.platformsCard}>
+            <Text style={st.platformsLabel}>Works with</Text>
+            <Text style={st.platformsList}>
+              YouTube  ·  Instagram  ·  Facebook  ·  TikTok  ·  Twitter/X  ·  Reddit  ·  Vimeo  ·  and 1000+ more
+            </Text>
+          </View>
+        )}
 
         {/* ── Error ── */}
         {!!error && (
@@ -284,7 +290,7 @@ export default function App() {
           </View>
         )}
 
-        {/* ── Video Card ── */}
+        {/* ── Video Info Card ── */}
         {info && (
           <Animated.View style={[st.card, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
 
@@ -302,13 +308,10 @@ export default function App() {
             {/* Title */}
             <Text style={st.videoTitle} numberOfLines={3}>{info.title}</Text>
 
-            {/* Divider */}
             <View style={st.divider} />
 
-            {/* Quality heading */}
+            {/* Quality */}
             <Text style={st.fieldLabel}>Pick a quality</Text>
-
-            {/* Quality Pills */}
             <View style={st.pillGrid}>
               {info.qualities.map((q) => (
                 <Pill
@@ -320,14 +323,12 @@ export default function App() {
               ))}
             </View>
 
-            {/* Download State */}
+            {/* Download State Indicator */}
             {isDownloading && (
               <Animated.View style={[st.dlStatus, { opacity: pulseAnim }]}>
                 <ActivityIndicator color={T.red} size="small" style={{ marginRight: 10 }} />
                 <Text style={st.dlStatusText}>
-                  {dlState === 'saving'
-                    ? 'Saving to gallery...'
-                    : `Downloading ${dlQuality}...`}
+                  {dlState === 'saving' ? 'Saving to gallery...' : `Downloading ${dlQuality}...`}
                 </Text>
               </Animated.View>
             )}
@@ -351,19 +352,19 @@ export default function App() {
 // ── Styles ────────────────────────────────────────────────────
 const st = StyleSheet.create({
 
-  safe: { flex: 1, backgroundColor: T.bg },
+  safe:   { flex: 1, backgroundColor: T.bg },
   scroll: { padding: 20, paddingBottom: 56 },
 
   // Header
-  header: { marginTop: 8, marginBottom: 28 },
-  logoRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  logoBox: {
+  header:   { marginTop: 8, marginBottom: 24 },
+  logoRow:  { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  logoBox:  {
     width: 46, height: 46, borderRadius: 13,
     backgroundColor: T.red, alignItems: 'center', justifyContent: 'center',
   },
-  logoIcon:  { fontSize: 18, color: T.white },
-  logoName:  { fontSize: 22, fontWeight: '800', color: T.t1, letterSpacing: -0.3 },
-  logoSub:   { fontSize: 12, color: T.t2, marginTop: 1 },
+  logoIcon: { fontSize: 18, color: T.white },
+  logoName: { fontSize: 22, fontWeight: '800', color: T.t1, letterSpacing: -0.3 },
+  logoSub:  { fontSize: 12, color: T.t2, marginTop: 1 },
 
   // Card
   card: {
@@ -373,6 +374,29 @@ const st = StyleSheet.create({
     borderColor: T.cardBorder,
     padding: 18,
     marginBottom: 14,
+  },
+
+  // Platforms hint card
+  platformsCard: {
+    backgroundColor: T.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: T.cardBorder,
+    padding: 14,
+    marginBottom: 14,
+  },
+  platformsLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.4,
+    color: T.t3,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  platformsList: {
+    fontSize: 13,
+    color: T.t2,
+    lineHeight: 20,
   },
 
   // Field label
@@ -386,7 +410,6 @@ const st = StyleSheet.create({
   },
 
   // Input
-  inputRow: { marginBottom: 12 },
   input: {
     backgroundColor: T.inputBg,
     borderWidth: 1,
@@ -396,6 +419,7 @@ const st = StyleSheet.create({
     paddingVertical: 13,
     fontSize: 14,
     color: T.t1,
+    marginBottom: 12,
   },
 
   // Primary button
@@ -414,7 +438,7 @@ const st = StyleSheet.create({
     letterSpacing: 0.2,
   },
 
-  // Error / Success
+  // Error
   errorBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -427,7 +451,7 @@ const st = StyleSheet.create({
     gap: 10,
   },
   errorIcon: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     color: T.red,
     width: 20,
@@ -440,6 +464,7 @@ const st = StyleSheet.create({
   },
   errorText: { color: T.red, fontSize: 14, flex: 1, lineHeight: 20 },
 
+  // Success
   successBox: {
     backgroundColor: T.greenDim,
     borderWidth: 1,
@@ -457,30 +482,18 @@ const st = StyleSheet.create({
     marginBottom: 14,
     position: 'relative',
   },
-  thumb: { width: '100%', height: 196 },
-  thumbScrim: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#00000040',
-  },
-  thumbMeta: {
-    position: 'absolute',
-    bottom: 10,
-    right: 10,
-  },
+  thumb:      { width: '100%', height: 196 },
+  thumbScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: '#00000040' },
+  thumbMeta:  { position: 'absolute', bottom: 10, right: 10 },
 
-  // Tag (duration badge)
+  // Duration tag
   tag: {
     backgroundColor: '#000000BB',
     borderRadius: 6,
     paddingHorizontal: 8,
     paddingVertical: 3,
   },
-  tagText: {
-    color: T.white,
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.4,
-  },
+  tagText: { color: T.white, fontSize: 12, fontWeight: '700', letterSpacing: 0.4 },
 
   // Video title
   videoTitle: {
@@ -494,12 +507,8 @@ const st = StyleSheet.create({
   // Divider
   divider: { height: 1, backgroundColor: T.divider, marginBottom: 16 },
 
-  // Quality pills grid
-  pillGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
+  // Quality pills
+  pillGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   pill: {
     borderWidth: 1,
     borderRadius: 8,
@@ -507,13 +516,13 @@ const st = StyleSheet.create({
     paddingVertical: 9,
   },
   pillDisabled: { opacity: 0.4 },
-  pillText: { fontSize: 13, fontWeight: '700' },
+  pillText:     { fontSize: 13, fontWeight: '700' },
 
   // Download status
   dlStatus: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 18,
+    marginTop: 16,
     backgroundColor: T.redDim,
     borderRadius: 10,
     padding: 12,
@@ -521,9 +530,9 @@ const st = StyleSheet.create({
   dlStatusText: { color: T.red, fontSize: 14, fontWeight: '600' },
 
   // Signature
-  sig: { alignItems: 'center', marginTop: 32, paddingTop: 0 },
+  sig:     { alignItems: 'center', marginTop: 32 },
   sigRule: { width: 28, height: 1, backgroundColor: T.cardBorder, marginBottom: 14 },
-  sigBy: {
+  sigBy:   {
     fontSize: 10,
     letterSpacing: 2.5,
     color: T.t3,
@@ -537,9 +546,5 @@ const st = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: 8,
   },
-  sigAccent: {
-    width: 6, height: 6,
-    borderRadius: 3,
-    backgroundColor: T.red,
-  },
+  sigAccent: { width: 6, height: 6, borderRadius: 3, backgroundColor: T.red },
 });
