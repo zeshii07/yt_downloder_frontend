@@ -1,10 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   Image, ActivityIndicator, ScrollView, SafeAreaView,
-  Alert, Animated, StatusBar, Dimensions,
+  Alert, Animated, StatusBar,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
 
 const BACKEND_URL = 'https://ytdownlodbackend-production.up.railway.app';
 
@@ -43,49 +44,67 @@ const Tag = ({ children }) => (
   <View style={st.tag}><Text style={st.tagText}>{children}</Text></View>
 );
 
-// ── THE FIX: StorageAccessFramework ──────────────────────────
-// SAF writes a brand-new file directly into a folder the user picks.
-// Android never asks "allow app to modify this file" because we are
-// CREATING a new file, not modifying an existing one.
-// No MediaLibrary = no modify popup. Ever.
-async function saveViaSAF(sourceUri, filename, mimeType) {
-  // Ask user to pick a folder (shows once; they pick Downloads or any folder)
-  const perms = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-
-  if (!perms.granted) {
-    throw new Error('Folder access was denied. Please pick a folder to save downloads.');
+// ── Save to Gallery (no modify popup) ────────────────────────
+// The modify popup appears when Android thinks you're overwriting
+// an existing media asset. Fix: delete the old asset first if it
+// exists, then createAssetAsync always sees it as a brand-new file.
+async function saveToGallery(uri, filename) {
+  // Check if an asset with this filename already exists in our album
+  const album = await MediaLibrary.getAlbumAsync('Video Downloader');
+  if (album) {
+    const { assets } = await MediaLibrary.getAssetsAsync({
+      album: album,
+      mediaType: [MediaLibrary.MediaType.video, MediaLibrary.MediaType.audio],
+    });
+    const existing = assets.find(a => a.filename === filename);
+    if (existing) {
+      // Delete old asset so Android treats the new one as a fresh create
+      await MediaLibrary.deleteAssetsAsync([existing]);
+    }
   }
 
-  // Create a brand-new empty file in the chosen folder
-  const destUri = await FileSystem.StorageAccessFramework.createFileAsync(
-    perms.directoryUri,
-    filename,
-    mimeType,
-  );
+  // Now create — Android sees this as new, no modify popup
+  const asset = await MediaLibrary.createAssetAsync(uri);
 
-  // Read cached file as base64, write to destination
-  const base64 = await FileSystem.readAsStringAsync(sourceUri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-
-  await FileSystem.writeAsStringAsync(destUri, base64, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
+  // Add to our album
+  const updatedAlbum = await MediaLibrary.getAlbumAsync('Video Downloader');
+  if (!updatedAlbum) {
+    await MediaLibrary.createAlbumAsync('Video Downloader', asset, false);
+  } else {
+    await MediaLibrary.addAssetsToAlbumAsync([asset], updatedAlbum.id, false);
+  }
 }
 
 // ── Main App ──────────────────────────────────────────────────
 export default function App() {
-  const [url, setUrl]         = useState('');
-  const [info, setInfo]       = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [url, setUrl]             = useState('');
+  const [info, setInfo]           = useState(null);
+  const [loading, setLoading]     = useState(false);
   const [dlQuality, setDlQuality] = useState(null);
-  const [error, setError]     = useState('');
-  const [success, setSuccess] = useState('');
-  const [dlState, setDlState] = useState('idle'); // idle | downloading | saving | done
+  const [error, setError]         = useState('');
+  const [success, setSuccess]     = useState('');
+  const [dlState, setDlState]     = useState('idle');
+  const [permGranted, setPermGranted] = useState(false);
 
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  // Ask permission once on launch — never again during downloads
+  useEffect(() => {
+    (async () => {
+      const { status } = await MediaLibrary.requestPermissionsAsync(false);
+      if (status === 'granted') {
+        setPermGranted(true);
+      } else {
+        Alert.alert(
+          'Permission Required',
+          'Please allow gallery access so downloads can be saved automatically.',
+          [{ text: 'OK' }]
+        );
+      }
+    })();
+  }, []);
 
   const showCard = () => Animated.parallel([
     Animated.timing(fadeAnim,  { toValue: 1, duration: 400, useNativeDriver: true }),
@@ -132,6 +151,16 @@ export default function App() {
   // ── Download ────────────────────────────────────────────────
   const handleDownload = async (quality) => {
     setError(''); setSuccess('');
+
+    if (!permGranted) {
+      const { status } = await MediaLibrary.requestPermissionsAsync(false);
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Allow gallery access in Settings to save downloads.');
+        return;
+      }
+      setPermGranted(true);
+    }
+
     setDlQuality(quality);
     setDlState('downloading');
     startPulse();
@@ -139,10 +168,9 @@ export default function App() {
     try {
       const sanitized = info.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
       const ext       = quality === 'audio' ? 'mp3' : 'mp4';
-      const mimeType  = quality === 'audio' ? 'audio/mpeg' : 'video/mp4';
       const filename  = `${sanitized}_${quality}.${ext}`;
 
-      // Step 1 ── Download to app cache (zero permissions needed)
+      // Step 1: Download to cache (no permissions needed)
       const cached = FileSystem.cacheDirectory + filename;
       const dlUrl  = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
       const result = await FileSystem.downloadAsync(dlUrl, cached);
@@ -153,16 +181,15 @@ export default function App() {
         return;
       }
 
-      // Step 2 ── Let user pick a save folder, then write file via SAF
-      // Android sees this as "creating a new file" not "modifying" — no popup
+      // Step 2: Save to gallery without triggering modify popup
       setDlState('saving');
-      await saveViaSAF(result.uri, filename, mimeType);
+      await saveToGallery(result.uri, filename);
 
-      // Step 3 ── Clean cache
+      // Step 3: Clean cache
       await FileSystem.deleteAsync(result.uri, { idempotent: true });
 
       setDlState('done');
-      setSuccess(`"${filename}" saved to your chosen folder ✓`);
+      setSuccess(`Saved to "Video Downloader" album in your gallery ✓`);
       setTimeout(reset, 3500);
 
     } catch (e) {
@@ -192,6 +219,13 @@ export default function App() {
             </View>
           </View>
         </View>
+
+        {/* Permission warning */}
+        {!permGranted && (
+          <View style={st.warnBox}>
+            <Text style={st.warnText}>⚠  Gallery permission needed to save downloads</Text>
+          </View>
+        )}
 
         {/* Input Card */}
         <View style={st.card}>
@@ -267,7 +301,7 @@ export default function App() {
               <Animated.View style={[st.dlStatus, { opacity: pulseAnim }]}>
                 <ActivityIndicator color={T.red} size="small" style={{ marginRight: 10 }} />
                 <Text style={st.dlStatusText}>
-                  {dlState === 'saving' ? 'Saving to folder...' : `Downloading ${dlQuality}...`}
+                  {dlState === 'saving' ? 'Saving to gallery...' : `Downloading ${dlQuality}...`}
                 </Text>
               </Animated.View>
             )}
@@ -276,13 +310,12 @@ export default function App() {
 
         {/* Signature */}
         <View style={st.sig}>
-  <View style={st.sigRule} />
-  <Text style={st.sigBy}>crafted with ♥ by</Text>
-  <Text style={st.sigName}>Zeeshan</Text>
-  <Text style={st.sigTagline}>made with love</Text>
-  <View style={st.sigAccent} />
-</View>
-  
+          <View style={st.sigRule} />
+          <Text style={st.sigBy}>crafted with ♥ by</Text>
+          <Text style={st.sigName}>Zeeshan</Text>
+          <Text style={st.sigTagline}>made with love</Text>
+          <View style={st.sigAccent} />
+        </View>
 
       </ScrollView>
     </SafeAreaView>
@@ -293,17 +326,20 @@ export default function App() {
 const st = StyleSheet.create({
   safe:   { flex: 1, backgroundColor: T.bg },
   scroll: { padding: 20, paddingBottom: 56 },
-sigTagline: { fontSize: 11, color: T.t2, letterSpacing: 1.2, marginTop: 4 },
-  header: { marginTop: 8, marginBottom: 24, alignItems: 'center', justifyContent: 'center' },
-logoRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
-  logoBox:  { width: 46, height: 46, borderRadius: 13, backgroundColor: T.red, alignItems: 'center', justifyContent: 'center' },
+
+  header:  { marginTop: 8, marginBottom: 24, alignItems: 'center', justifyContent: 'center' },
+  logoRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
+  logoBox: { width: 46, height: 46, borderRadius: 13, backgroundColor: T.red, alignItems: 'center', justifyContent: 'center' },
   logoIcon: { fontSize: 18, color: T.white },
   logoName: { fontSize: 22, fontWeight: '800', color: T.t1, letterSpacing: -0.3 },
   logoSub:  { fontSize: 12, color: T.t2, marginTop: 1 },
 
+  warnBox:  { backgroundColor: '#2A1A00', borderWidth: 1, borderColor: '#FF990040', borderRadius: 11, padding: 12, marginBottom: 14 },
+  warnText: { color: '#FF9900', fontSize: 13, fontWeight: '600' },
+
   card: { backgroundColor: T.card, borderRadius: 18, borderWidth: 1, borderColor: T.cardBorder, padding: 18, marginBottom: 14 },
 
-  platformsCard: { backgroundColor: T.surface, borderRadius: 12, borderWidth: 1, borderColor: T.cardBorder, padding: 14, marginBottom: 14 },
+  platformsCard:  { backgroundColor: T.surface, borderRadius: 12, borderWidth: 1, borderColor: T.cardBorder, padding: 14, marginBottom: 14 },
   platformsLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.4, color: T.t3, textTransform: 'uppercase', marginBottom: 6 },
   platformsList:  { fontSize: 13, color: T.t2, lineHeight: 20 },
 
@@ -333,17 +369,18 @@ logoRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
   videoTitle: { fontSize: 16, fontWeight: '700', color: T.t1, lineHeight: 23, marginBottom: 16 },
   divider:    { height: 1, backgroundColor: T.divider, marginBottom: 16 },
 
-  pillGrid:    { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  pill:        { borderWidth: 1, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
-  pillDisabled:{ opacity: 0.4 },
-  pillText:    { fontSize: 13, fontWeight: '700' },
+  pillGrid:     { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  pill:         { borderWidth: 1, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
+  pillDisabled: { opacity: 0.4 },
+  pillText:     { fontSize: 13, fontWeight: '700' },
 
   dlStatus:     { flexDirection: 'row', alignItems: 'center', marginTop: 16, backgroundColor: T.redDim, borderRadius: 10, padding: 12 },
   dlStatusText: { color: T.red, fontSize: 14, fontWeight: '600' },
 
-  sig:      { alignItems: 'center', marginTop: 32 },
-  sigRule:  { width: 28, height: 1, backgroundColor: T.cardBorder, marginBottom: 14 },
-  sigBy:    { fontSize: 10, letterSpacing: 2.5, color: T.t3, textTransform: 'uppercase', marginBottom: 5 },
-  sigName:  { fontSize: 26, fontWeight: '800', color: T.red, letterSpacing: 0.5, marginBottom: 8 },
-  sigAccent:{ width: 6, height: 6, borderRadius: 3, backgroundColor: T.red },
+  sig:       { alignItems: 'center', marginTop: 32 },
+  sigRule:   { width: 28, height: 1, backgroundColor: T.cardBorder, marginBottom: 14 },
+  sigBy:     { fontSize: 10, letterSpacing: 2.5, color: T.t3, textTransform: 'uppercase', marginBottom: 5 },
+  sigName:   { fontSize: 26, fontWeight: '800', color: T.red, letterSpacing: 0.5, marginBottom: 8 },
+  sigTagline:{ fontSize: 11, color: T.t2, letterSpacing: 1.2, marginTop: 4 },
+  sigAccent: { width: 6, height: 6, borderRadius: 3, backgroundColor: T.red },
 });
