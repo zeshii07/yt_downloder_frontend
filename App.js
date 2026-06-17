@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -83,10 +83,30 @@ export default function App() {
   const [error, setError]         = useState('');
   const [success, setSuccess]     = useState('');
   const [dlState, setDlState]     = useState('idle'); // idle | downloading | saving | done
+  const [permGranted, setPermGranted] = useState(false);
 
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  // ── FIX #1: Request permissions on app launch (not per-download)
+  // This ensures the prompt appears once at startup and never during a download
+  useEffect(() => {
+    (async () => {
+      // FIX #2: Pass false (not true) to avoid the "modify media" popup
+      // false = we only need to ADD new files, not modify existing ones
+      const { status } = await MediaLibrary.requestPermissionsAsync(false);
+      if (status === 'granted') {
+        setPermGranted(true);
+      } else {
+        Alert.alert(
+          'Permission Required',
+          'Video Downloader needs gallery access to save your downloads. Please grant it in Settings.',
+          [{ text: 'OK' }]
+        );
+      }
+    })();
+  }, []);
 
   const showCard = () => {
     Animated.parallel([
@@ -157,11 +177,19 @@ export default function App() {
     setError('');
     setSuccess('');
 
-    // Request write permission upfront — reduces per-file modify popups
-    const { status } = await MediaLibrary.requestPermissionsAsync(true);
-    if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Allow media access to save downloads.');
-      return;
+    // FIX #3: Check permission state — if not granted, re-request once
+    // but never block mid-download with a system popup
+    if (!permGranted) {
+      const { status } = await MediaLibrary.requestPermissionsAsync(false);
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'Please allow gallery access in your phone Settings to save downloads.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      setPermGranted(true);
     }
 
     setDlQuality(quality);
@@ -172,42 +200,55 @@ export default function App() {
       const sanitized = info.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
       const ext       = quality === 'audio' ? 'mp3' : 'mp4';
       const filename  = `${sanitized}_${quality}.${ext}`;
-      const dest      = FileSystem.documentDirectory + filename;
-      const dlUrl     = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
 
-      // Download file
+      // FIX #4: Use cacheDirectory instead of documentDirectory
+      // cacheDirectory is always writable and doesn't need extra permissions
+      const dest   = FileSystem.cacheDirectory + filename;
+      const dlUrl  = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
+
+      // Download to cache
       const result = await FileSystem.downloadAsync(dlUrl, dest);
 
       if (result.status !== 200) {
         setError(`Download failed (status ${result.status}). Try another quality.`);
+        setDlState('idle');
         return;
       }
 
       setDlState('saving');
 
-      // Save to media library
+      // FIX #5: Save to gallery — createAssetAsync handles the gallery write
+      // This is the correct API for Android 10+ (no WRITE_EXTERNAL_STORAGE needed)
       const asset = await MediaLibrary.createAssetAsync(result.uri);
-      const album = await MediaLibrary.getAlbumAsync('Video Downloader');
-      if (!album) {
-        await MediaLibrary.createAlbumAsync('Video Downloader', asset, false);
-      } else {
-        await MediaLibrary.addAssetsToAlbumAsync([asset], album.id, false);
+
+      // FIX #6: Separate album management with error handling
+      // Album creation can fail silently — wrap it independently
+      try {
+        const album = await MediaLibrary.getAlbumAsync('Video Downloader');
+        if (!album) {
+          await MediaLibrary.createAlbumAsync('Video Downloader', asset, false);
+        } else {
+          await MediaLibrary.addAssetsToAlbumAsync([asset], album.id, false);
+        }
+      } catch {
+        // Album failed but file is already in gallery — not a critical error
+        console.warn('Album organisation failed, file still saved to gallery.');
       }
 
-      // Clean up temp file
+      // Clean up cache file
       await FileSystem.deleteAsync(result.uri, { idempotent: true });
 
       setDlState('done');
-      setSuccess('Saved to your gallery in "Video Downloader" album.');
+      setSuccess('Saved to your gallery in "Video Downloader" album ✓');
       setTimeout(reset, 3500);
 
     } catch (e) {
       setError(`Download failed: ${e.message}`);
+      setDlState('idle');
     } finally {
       stopPulse();
       setLoading(false);
       setDlQuality(null);
-      if (dlState !== 'done') setDlState('idle');
     }
   };
 
@@ -235,6 +276,13 @@ export default function App() {
             </View>
           </View>
         </View>
+
+        {/* ── Permission Warning Banner ── */}
+        {!permGranted && (
+          <View style={st.warnBox}>
+            <Text style={st.warnText}>⚠  Gallery permission needed to save downloads</Text>
+          </View>
+        )}
 
         {/* ── Input Card ── */}
         <View style={st.card}>
@@ -286,7 +334,7 @@ export default function App() {
         {/* ── Success ── */}
         {!!success && (
           <View style={st.successBox}>
-            <Text style={st.successText}>✓  {success}</Text>
+            <Text style={st.successText}>{success}</Text>
           </View>
         )}
 
@@ -375,6 +423,17 @@ const st = StyleSheet.create({
     padding: 18,
     marginBottom: 14,
   },
+
+  // Permission warning
+  warnBox: {
+    backgroundColor: '#2A1A00',
+    borderWidth: 1,
+    borderColor: '#FF990040',
+    borderRadius: 11,
+    padding: 12,
+    marginBottom: 14,
+  },
+  warnText: { color: '#FF9900', fontSize: 13, fontWeight: '600' },
 
   // Platforms hint card
   platformsCard: {

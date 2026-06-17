@@ -1,34 +1,39 @@
 {
   "expo": {
-    "name": "YouTubeDownloaderApp",
-    "slug": "YouTubeDownloaderApp",
+    "name": "Video Downloader",
+    "slug": "VideoDownloader",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#080810"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Video Downloader needs access to save videos to your gallery.",
+        "NSPhotoLibraryAddUsageDescription": "Video Downloader needs permission to add videos to your gallery."
+      }
     },
     "android": {
-  "package": "com.zeeshan.youtubedownloader",
-  "adaptiveIcon": {
-    "foregroundImage": "./assets/adaptive-icon.png",
-    "backgroundColor": "#ffffff"
-  },
-  "permissions": [
-  "android.permission.READ_EXTERNAL_STORAGE",
-  "android.permission.WRITE_EXTERNAL_STORAGE",
-  "android.permission.READ_MEDIA_VIDEO",
-  "android.permission.READ_MEDIA_AUDIO"
-],
-  "edgeToEdgeEnabled": true
-},
+      "package": "com.zeeshan.videodownloader",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#080810"
+      },
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_IMAGES"
+      ],
+      "edgeToEdgeEnabled": true
+    },
     "web": {
       "favicon": "./assets/favicon.png"
     },
@@ -36,6 +41,16 @@
       "eas": {
         "projectId": "bc19a37d-f9c1-4b98-88e4-658730d3e986"
       }
-    }
+    },
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Video Downloader to access your photos.",
+          "savePhotosPermission": "Allow Video Downloader to save videos to your gallery.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ]
+    ]
   }
 }
