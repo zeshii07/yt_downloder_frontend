@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "expo": "^54.0.35",
+    "expo-build-properties": "~1.0.10",
     "expo-file-system": "~19.0.23",
     "expo-intent-launcher": "~13.0.8",
     "expo-media-library": "~18.2.1",
