@@ -2,12 +2,18 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   Image, ActivityIndicator, ScrollView, SafeAreaView,
-  Alert, Animated, StatusBar,
+  Alert, Animated, StatusBar, NativeModules, Platform,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as MediaLibrary from 'expo-media-library';
+import * as IntentLauncher from 'expo-intent-launcher';
 
 const BACKEND_URL = 'https://ytdownlodbackend-production.up.railway.app';
+
+// Downloads folder path — always exists on every Android device
+// App creates its own subfolder inside: /sdcard/Download/Video Downloader/
+const DOWNLOAD_DIR = FileSystem.StorageDirectories?.Downloads
+  ? `${FileSystem.StorageDirectories.Downloads}Video Downloader/`
+  : 'file:///storage/emulated/0/Download/Video Downloader/';
 
 // ── Design Tokens ─────────────────────────────────────────────
 const T = {
@@ -23,7 +29,6 @@ const qualityColor = (q) => {
   if (q === 'audio') return { bg: T.redDim,   border: T.red   + '40', text: T.red   };
   return                    { bg: T.blueDim,  border: T.blue  + '40', text: T.blue  };
 };
-
 const qualityLabel = (q) => {
   if (q === 'best')  return '⚡  Best';
   if (q === 'audio') return '♪  Audio';
@@ -44,34 +49,32 @@ const Tag = ({ children }) => (
   <View style={st.tag}><Text style={st.tagText}>{children}</Text></View>
 );
 
-// ── Save to Gallery (no modify popup) ────────────────────────
-// The modify popup appears when Android thinks you're overwriting
-// an existing media asset. Fix: delete the old asset first if it
-// exists, then createAssetAsync always sees it as a brand-new file.
-async function saveToGallery(uri, filename) {
-  // Check if an asset with this filename already exists in our album
-  const album = await MediaLibrary.getAlbumAsync('Video Downloader');
-  if (album) {
-    const { assets } = await MediaLibrary.getAssetsAsync({
-      album: album,
-      mediaType: [MediaLibrary.MediaType.video, MediaLibrary.MediaType.audio],
-    });
-    const existing = assets.find(a => a.filename === filename);
-    if (existing) {
-      // Delete old asset so Android treats the new one as a fresh create
-      await MediaLibrary.deleteAssetsAsync([existing]);
-    }
+// ── Check MANAGE_EXTERNAL_STORAGE permission ───────────────────
+// This is a special permission that must be granted via Settings on Android 11+
+// It cannot be requested via a simple popup — Android forces the user to
+// go to Settings > Special app access > All files access > toggle on
+async function checkManageStoragePermission() {
+  try {
+    // expo-file-system exposes this check
+    const info = await FileSystem.getInfoAsync('file:///storage/emulated/0/');
+    return info.exists;
+  } catch {
+    return false;
   }
+}
 
-  // Now create — Android sees this as new, no modify popup
-  const asset = await MediaLibrary.createAssetAsync(uri);
-
-  // Add to our album
-  const updatedAlbum = await MediaLibrary.getAlbumAsync('Video Downloader');
-  if (!updatedAlbum) {
-    await MediaLibrary.createAlbumAsync('Video Downloader', asset, false);
-  } else {
-    await MediaLibrary.addAssetsToAlbumAsync([asset], updatedAlbum.id, false);
+async function openManageStorageSettings() {
+  try {
+    // Opens the "All files access" settings page directly for this app
+    await IntentLauncher.startActivityAsync(
+      'android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION',
+      { data: 'package:com.zeeshan.videodownloader' }
+    );
+  } catch {
+    // Fallback: open general storage settings
+    await IntentLauncher.startActivityAsync(
+      'android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION'
+    );
   }
 }
 
@@ -84,27 +87,40 @@ export default function App() {
   const [error, setError]         = useState('');
   const [success, setSuccess]     = useState('');
   const [dlState, setDlState]     = useState('idle');
-  const [permGranted, setPermGranted] = useState(false);
+  const [hasPermission, setHasPermission] = useState(false);
+  const [checkingPerm, setCheckingPerm]   = useState(true);
 
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
-  // Ask permission once on launch — never again during downloads
+  // Check permission on launch and every time app comes to foreground
   useEffect(() => {
-    (async () => {
-      const { status } = await MediaLibrary.requestPermissionsAsync(false);
-      if (status === 'granted') {
-        setPermGranted(true);
-      } else {
-        Alert.alert(
-          'Permission Required',
-          'Please allow gallery access so downloads can be saved automatically.',
-          [{ text: 'OK' }]
-        );
-      }
-    })();
+    checkPerm();
   }, []);
+
+  const checkPerm = async () => {
+    setCheckingPerm(true);
+    const granted = await checkManageStoragePermission();
+    setHasPermission(granted);
+    setCheckingPerm(false);
+
+    if (granted) {
+      // Create our app folder silently — user never sees this
+      await ensureDownloadDir();
+    }
+  };
+
+  const ensureDownloadDir = async () => {
+    try {
+      const info = await FileSystem.getInfoAsync(DOWNLOAD_DIR);
+      if (!info.exists) {
+        await FileSystem.makeDirectoryAsync(DOWNLOAD_DIR, { intermediates: true });
+      }
+    } catch (e) {
+      console.warn('Could not create download dir:', e.message);
+    }
+  };
 
   const showCard = () => Animated.parallel([
     Animated.timing(fadeAnim,  { toValue: 1, duration: 400, useNativeDriver: true }),
@@ -125,7 +141,6 @@ export default function App() {
     fadeAnim.setValue(0); slideAnim.setValue(24);
   };
 
-  // ── Fetch Info ──────────────────────────────────────────────
   const handleGetInfo = async () => {
     setError(''); setSuccess(''); setInfo(null);
     fadeAnim.setValue(0); slideAnim.setValue(24);
@@ -148,19 +163,8 @@ export default function App() {
     }
   };
 
-  // ── Download ────────────────────────────────────────────────
   const handleDownload = async (quality) => {
     setError(''); setSuccess('');
-
-    if (!permGranted) {
-      const { status } = await MediaLibrary.requestPermissionsAsync(false);
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Allow gallery access in Settings to save downloads.');
-        return;
-      }
-      setPermGranted(true);
-    }
-
     setDlQuality(quality);
     setDlState('downloading');
     startPulse();
@@ -170,10 +174,11 @@ export default function App() {
       const ext       = quality === 'audio' ? 'mp3' : 'mp4';
       const filename  = `${sanitized}_${quality}.${ext}`;
 
-      // Step 1: Download to cache (no permissions needed)
-      const cached = FileSystem.cacheDirectory + filename;
-      const dlUrl  = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
-      const result = await FileSystem.downloadAsync(dlUrl, cached);
+      // Save directly to /Download/Video Downloader/ — no popup, no ask
+      const finalPath = DOWNLOAD_DIR + filename;
+      const dlUrl     = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
+
+      const result = await FileSystem.downloadAsync(dlUrl, finalPath);
 
       if (result.status !== 200) {
         setError(`Download failed (HTTP ${result.status}). Try another quality.`);
@@ -181,15 +186,8 @@ export default function App() {
         return;
       }
 
-      // Step 2: Save to gallery without triggering modify popup
-      setDlState('saving');
-      await saveToGallery(result.uri, filename);
-
-      // Step 3: Clean cache
-      await FileSystem.deleteAsync(result.uri, { idempotent: true });
-
       setDlState('done');
-      setSuccess(`Saved to "Video Downloader" album in your gallery ✓`);
+      setSuccess(`Saved to Downloads/Video Downloader/${filename} ✓`);
       setTimeout(reset, 3500);
 
     } catch (e) {
@@ -204,6 +202,49 @@ export default function App() {
 
   const isDownloading = dlState === 'downloading' || dlState === 'saving';
 
+  // ── Loading ───────────────────────────────────────────────
+  if (checkingPerm) {
+    return (
+      <SafeAreaView style={st.safe}>
+        <View style={st.center}>
+          <ActivityIndicator color={T.red} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Permission screen (shown once until user grants) ──────
+  if (!hasPermission) {
+    return (
+      <SafeAreaView style={st.safe}>
+        <StatusBar barStyle="light-content" backgroundColor={T.bg} />
+        <View style={st.setupWrap}>
+          <View style={st.logoBox2}>
+            <Text style={st.logoIcon}>▶</Text>
+          </View>
+          <Text style={st.setupTitle}>Storage Access</Text>
+          <Text style={st.setupDesc}>
+            Video Downloader needs access to your storage to save downloaded videos directly
+            to your Downloads folder — with no popups or interruptions.
+          </Text>
+          <View style={st.stepBox}>
+            <Text style={st.stepText}>① Tap the button below</Text>
+            <Text style={st.stepText}>② Find <Text style={{ color: T.red, fontWeight: '700' }}>Video Downloader</Text> in the list</Text>
+            <Text style={st.stepText}>③ Toggle <Text style={{ color: T.red, fontWeight: '700' }}>Allow all files access</Text> ON</Text>
+            <Text style={st.stepText}>④ Come back to the app</Text>
+          </View>
+          <TouchableOpacity style={st.setupBtn} onPress={openManageStorageSettings} activeOpacity={0.8}>
+            <Text style={st.setupBtnText}>Open Storage Settings</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={st.recheckBtn} onPress={checkPerm} activeOpacity={0.8}>
+            <Text style={st.recheckBtnText}>I've granted it — continue</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Main UI ───────────────────────────────────────────────
   return (
     <SafeAreaView style={st.safe}>
       <StatusBar barStyle="light-content" backgroundColor={T.bg} />
@@ -219,13 +260,6 @@ export default function App() {
             </View>
           </View>
         </View>
-
-        {/* Permission warning */}
-        {!permGranted && (
-          <View style={st.warnBox}>
-            <Text style={st.warnText}>⚠  Gallery permission needed to save downloads</Text>
-          </View>
-        )}
 
         {/* Input Card */}
         <View style={st.card}>
@@ -251,7 +285,7 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
-        {/* Platforms hint */}
+        {/* Platforms */}
         {!info && !loading && (
           <View style={st.platformsCard}>
             <Text style={st.platformsLabel}>Works with</Text>
@@ -301,7 +335,7 @@ export default function App() {
               <Animated.View style={[st.dlStatus, { opacity: pulseAnim }]}>
                 <ActivityIndicator color={T.red} size="small" style={{ marginRight: 10 }} />
                 <Text style={st.dlStatusText}>
-                  {dlState === 'saving' ? 'Saving to gallery...' : `Downloading ${dlQuality}...`}
+                  {dlState === 'saving' ? 'Saving...' : `Downloading ${dlQuality}...`}
                 </Text>
               </Animated.View>
             )}
@@ -326,16 +360,27 @@ export default function App() {
 const st = StyleSheet.create({
   safe:   { flex: 1, backgroundColor: T.bg },
   scroll: { padding: 20, paddingBottom: 56 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
-  header:  { marginTop: 8, marginBottom: 24, alignItems: 'center', justifyContent: 'center' },
-  logoRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
-  logoBox: { width: 46, height: 46, borderRadius: 13, backgroundColor: T.red, alignItems: 'center', justifyContent: 'center' },
+  // Permission screen
+  setupWrap:    { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 28 },
+  logoBox2:     { width: 72, height: 72, borderRadius: 20, backgroundColor: T.red, alignItems: 'center', justifyContent: 'center', marginBottom: 28 },
+  setupTitle:   { fontSize: 26, fontWeight: '800', color: T.t1, marginBottom: 14, textAlign: 'center' },
+  setupDesc:    { fontSize: 14, color: T.t2, textAlign: 'center', lineHeight: 22, marginBottom: 20 },
+  stepBox:      { backgroundColor: T.surface, borderRadius: 12, borderWidth: 1, borderColor: T.cardBorder, padding: 16, width: '100%', marginBottom: 28, gap: 10 },
+  stepText:     { fontSize: 14, color: T.t2, lineHeight: 22 },
+  setupBtn:     { backgroundColor: T.red, borderRadius: 14, paddingVertical: 16, width: '100%', alignItems: 'center', marginBottom: 12 },
+  setupBtnText: { color: T.white, fontSize: 16, fontWeight: '700' },
+  recheckBtn:   { paddingVertical: 12, width: '100%', alignItems: 'center' },
+  recheckBtnText: { color: T.t2, fontSize: 14, fontWeight: '600' },
+
+  // Header
+  header:   { marginTop: 8, marginBottom: 24, alignItems: 'center', justifyContent: 'center' },
+  logoRow:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 },
+  logoBox:  { width: 46, height: 46, borderRadius: 13, backgroundColor: T.red, alignItems: 'center', justifyContent: 'center' },
   logoIcon: { fontSize: 18, color: T.white },
   logoName: { fontSize: 22, fontWeight: '800', color: T.t1, letterSpacing: -0.3 },
   logoSub:  { fontSize: 12, color: T.t2, marginTop: 1 },
-
-  warnBox:  { backgroundColor: '#2A1A00', borderWidth: 1, borderColor: '#FF990040', borderRadius: 11, padding: 12, marginBottom: 14 },
-  warnText: { color: '#FF9900', fontSize: 13, fontWeight: '600' },
 
   card: { backgroundColor: T.card, borderRadius: 18, borderWidth: 1, borderColor: T.cardBorder, padding: 18, marginBottom: 14 },
 
@@ -377,10 +422,10 @@ const st = StyleSheet.create({
   dlStatus:     { flexDirection: 'row', alignItems: 'center', marginTop: 16, backgroundColor: T.redDim, borderRadius: 10, padding: 12 },
   dlStatusText: { color: T.red, fontSize: 14, fontWeight: '600' },
 
-  sig:       { alignItems: 'center', marginTop: 32 },
-  sigRule:   { width: 28, height: 1, backgroundColor: T.cardBorder, marginBottom: 14 },
-  sigBy:     { fontSize: 10, letterSpacing: 2.5, color: T.t3, textTransform: 'uppercase', marginBottom: 5 },
-  sigName:   { fontSize: 26, fontWeight: '800', color: T.red, letterSpacing: 0.5, marginBottom: 8 },
-  sigTagline:{ fontSize: 11, color: T.t2, letterSpacing: 1.2, marginTop: 4 },
-  sigAccent: { width: 6, height: 6, borderRadius: 3, backgroundColor: T.red },
+  sig:        { alignItems: 'center', marginTop: 32 },
+  sigRule:    { width: 28, height: 1, backgroundColor: T.cardBorder, marginBottom: 14 },
+  sigBy:      { fontSize: 10, letterSpacing: 2.5, color: T.t3, textTransform: 'uppercase', marginBottom: 5 },
+  sigName:    { fontSize: 26, fontWeight: '800', color: T.red, letterSpacing: 0.5, marginBottom: 4 },
+  sigTagline: { fontSize: 11, color: T.t2, letterSpacing: 1.2, marginBottom: 8 },
+  sigAccent:  { width: 6, height: 6, borderRadius: 3, backgroundColor: T.red },
 });

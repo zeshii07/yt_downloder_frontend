@@ -2,7 +2,7 @@
   "expo": {
     "name": "Video Downloader",
     "slug": "YouTubeDownloaderApp",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -28,6 +28,7 @@
       "permissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.MANAGE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_MEDIA_IMAGES"
@@ -41,16 +42,6 @@
       "eas": {
         "projectId": "bc19a37d-f9c1-4b98-88e4-658730d3e986"
       }
-    },
-    "plugins": [
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Allow Video Downloader to access your photos.",
-          "savePhotosPermission": "Allow Video Downloader to save videos to your gallery.",
-          "isAccessMediaLocationEnabled": true
-        }
-      ]
-    ]
+    }
   }
 }
