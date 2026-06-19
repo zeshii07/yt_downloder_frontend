@@ -89,20 +89,13 @@ const Step = ({ n, label, active, done }) => (
 );
 
 // ── Permission helpers ────────────────────────────────────────
+// We only ever write into our own app sandbox and hand files to
+// MediaLibrary — so MediaLibrary's own permission is all we need.
+// No more MANAGE_EXTERNAL_STORAGE / raw path access required.
 async function requestStoragePermission() {
   try {
-    // Step 1: request MediaLibrary permission (covers READ on all Android)
     const { status } = await MediaLibrary.requestPermissionsAsync();
-    if (status !== 'granted') return false;
-
-    // Step 2: on Android 11+ (API 30+) we need MANAGE_ALL_FILES for writing to Downloads
-    // We check by attempting to list the root external storage
-    try {
-      const info = await FileSystem.getInfoAsync('file:///storage/emulated/0/Download/');
-      return info.exists;
-    } catch {
-      return false;
-    }
+    return status === 'granted';
   } catch {
     return false;
   }
@@ -111,29 +104,27 @@ async function requestStoragePermission() {
 async function openStorageSettings() {
   try {
     await IntentLauncher.startActivityAsync(
-      'android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION',
+      'android.settings.APPLICATION_DETAILS_SETTINGS',
       { data: 'package:com.zeeshan.videodownloader' }
     );
-  } catch {
-    try {
-      await IntentLauncher.startActivityAsync('android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION');
-    } catch {
-      await IntentLauncher.startActivityAsync('android.settings.APPLICATION_DETAILS_SETTINGS',
-        { data: 'package:com.zeeshan.videodownloader' });
-    }
-  }
+  } catch {}
 }
 
-const DOWNLOAD_DIR = 'file:///storage/emulated/0/Download/VideoDownloader/';
+// Modern Android (Scoped Storage) blocks direct writes to /storage/emulated/0/Download
+// from FileSystem.downloadAsync even with MANAGE_EXTERNAL_STORAGE granted.
+// Reliable pattern: download into the app's own sandbox (always writable),
+// then hand the file to MediaLibrary, which has the proper API to place it
+// in the public Downloads/Movies collection.
+const SANDBOX_DIR = FileSystem.cacheDirectory + 'video-downloader/';
 
-async function ensureDownloadDir() {
+async function ensureSandboxDir() {
   try {
-    const info = await FileSystem.getInfoAsync(DOWNLOAD_DIR);
+    const info = await FileSystem.getInfoAsync(SANDBOX_DIR);
     if (!info.exists) {
-      await FileSystem.makeDirectoryAsync(DOWNLOAD_DIR, { intermediates: true });
+      await FileSystem.makeDirectoryAsync(SANDBOX_DIR, { intermediates: true });
     }
   } catch (e) {
-    console.warn('Could not create download dir:', e.message);
+    console.warn('Could not create sandbox dir:', e.message);
   }
 }
 
@@ -175,7 +166,7 @@ export default function App() {
     clearTimeout(spinTimer.current);
     setHasPermission(granted);
     setCheckingPerm(false);
-    if (granted) ensureDownloadDir();
+    if (granted) ensureSandboxDir();
   };
 
   const showCard = () => {
@@ -237,15 +228,16 @@ export default function App() {
     setDlQuality(quality); setDlState('downloading'); startPulse();
 
     try {
-      await ensureDownloadDir();
+      await ensureSandboxDir();
 
       const sanitized = (info.title || 'video').replace(/[^a-z0-9]/gi, '_').toLowerCase().slice(0, 60);
       const ext       = quality === 'audio' ? 'mp3' : 'mp4';
       const filename  = `${sanitized}_${quality}_${Date.now()}.${ext}`;
-      const finalPath = DOWNLOAD_DIR + filename;
+      const sandboxPath = SANDBOX_DIR + filename;
       const dlUrl     = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
 
-      const result = await FileSystem.downloadAsync(dlUrl, finalPath);
+      // Step 1: download into the app's private sandbox (always writable, no permission issues)
+      const result = await FileSystem.downloadAsync(dlUrl, sandboxPath);
 
       if (result.status !== 200) {
         setError(`Download failed (HTTP ${result.status}). Try a different quality.`);
@@ -253,12 +245,27 @@ export default function App() {
         return;
       }
 
-      // Scan the file so it appears in Gallery/Files app
-      try { await MediaLibrary.createAssetAsync(finalPath); } catch {}
+      // Step 2: hand the file to MediaLibrary, which knows how to place it
+      // in the public Downloads/Movies collection under modern Scoped Storage.
+      const asset = await MediaLibrary.createAssetAsync(sandboxPath);
+      try {
+        let album = await MediaLibrary.getAlbumAsync('VideoDownloader');
+        if (album == null) {
+          await MediaLibrary.createAlbumAsync('VideoDownloader', asset, false);
+        } else {
+          await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+        }
+      } catch (albumErr) {
+        // Asset is still saved to the gallery even if album creation fails
+        console.warn('Album step failed, file still saved:', albumErr.message);
+      }
+
+      // Step 3: clean up the sandbox copy now that MediaLibrary has its own copy
+      try { await FileSystem.deleteAsync(sandboxPath, { idempotent: true }); } catch {}
 
       setDlState('done');
       Animated.spring(successAnim, { toValue: 1, speed: 14, useNativeDriver: true }).start();
-      setSuccess('Saved to Downloads/VideoDownloader/');
+      setSuccess('Saved to your Gallery, album "VideoDownloader"');
       setTimeout(() => { successAnim.setValue(0); reset(); }, 3500);
 
     } catch (e) {
@@ -300,31 +307,17 @@ export default function App() {
           <Text style={{ fontSize: 28 }}>🗂️</Text>
         </View>
 
-        <Text style={st.permTitle}>Storage access needed</Text>
+        <Text style={st.permTitle}>Allow media access</Text>
         <Text style={st.permDesc}>
-          Grant "All files access" so downloads save directly to your Downloads folder — no extra steps each time.
+          Video Downloader needs permission to save videos to your gallery. Tap below to allow it.
         </Text>
 
-        <View style={st.stepsWrap}>
-          {[
-            'Tap "Open Settings" below',
-            'Find Video Downloader in the list',
-            'Toggle "Allow all files access" ON',
-            'Come back and tap Continue',
-          ].map((label, i) => (
-            <React.Fragment key={i}>
-              <Step n={i + 1} label={label} active={i === 0} />
-              {i < 3 && <View style={st.stepLine} />}
-            </React.Fragment>
-          ))}
-        </View>
-
-        <TouchableOpacity style={st.accentBtn} onPress={openStorageSettings} activeOpacity={0.85}>
-          <Text style={st.accentBtnText}>Open Settings</Text>
+        <TouchableOpacity style={st.accentBtn} onPress={doPermCheck} activeOpacity={0.85}>
+          <Text style={st.accentBtnText}>Allow Access</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={st.ghostBtn} onPress={doPermCheck} activeOpacity={0.7}>
-          <Text style={st.ghostBtnText}>I've granted it — Continue →</Text>
+        <TouchableOpacity style={st.ghostBtn} onPress={openStorageSettings} activeOpacity={0.7}>
+          <Text style={st.ghostBtnText}>Already denied? Open app settings →</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

@@ -1,4 +1,4 @@
- {
+{
   "expo": {
     "name": "Video Downloader",
     "slug": "video-downloader",
@@ -16,7 +16,10 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.MANAGE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.READ_MEDIA_AUDIO"
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.ACCESS_MEDIA_LOCATION",
+        "android.permission.READ_MEDIA_IMAGES"
       ]
     },
     "plugins": [
@@ -38,6 +41,11 @@
           }
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "9e076615-b80d-40ac-9e19-2cf9540885d6"
+      }
+    }
   }
 }
