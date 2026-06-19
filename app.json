@@ -1,4 +1,4 @@
-{
+ {
   "expo": {
     "name": "Video Downloader",
     "slug": "video-downloader",
@@ -32,12 +32,9 @@
         "expo-build-properties",
         {
           "android": {
-            "compileSdkVersion": 34,
-            "targetSdkVersion": 34,
-            "buildToolsVersion": "34.0.0",
-            "extraPropertiesValues": {
-              "android.useAndroidX": true
-            }
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "buildToolsVersion": "36.0.0"
           }
         }
       ]
