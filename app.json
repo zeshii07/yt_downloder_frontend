@@ -4,47 +4,37 @@
     "slug": "video-downloader",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
-    "android": {
-      "package": "com.zeeshan.videodownloader",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#080910"
-      },
-      "permissions": [
-        "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.MANAGE_EXTERNAL_STORAGE",
-        "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.READ_MEDIA_AUDIO",
-        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
-        "android.permission.ACCESS_MEDIA_LOCATION",
-        "android.permission.READ_MEDIA_IMAGES"
-      ]
-    },
     "plugins": [
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow Video Downloader to save videos.",
-          "savePhotosPermission": "Allow Video Downloader to save videos.",
-          "isAccessMediaLocationEnabled": true
+          "photosPermission": "Allow Video Downloader to access your photos.",
+          "savePhotosPermission": "Allow Video Downloader to save videos to your gallery."
         }
       ],
       [
-        "expo-build-properties",
+        "expo-file-system",
         {
-          "android": {
-            "compileSdkVersion": 36,
-            "targetSdkVersion": 36,
-            "buildToolsVersion": "36.0.0"
-          }
+          "filesystemAllowEscalation": true
         }
       ]
     ],
-    "extra": {
-      "eas": {
-        "projectId": "9e076615-b80d-40ac-9e19-2cf9540885d6"
+    "android": {
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_AUDIO"
+      ],
+      "package": "com.zeeshan.videodownloader",
+      "adaptiveIcon": {
+        "backgroundColor": "#080910"
+      }
+    },
+    "ios": {
+      "infoPlist": {
+        "NSPhotoLibraryAddUsageDescription": "Allow Video Downloader to save videos to your gallery."
       }
     }
   }

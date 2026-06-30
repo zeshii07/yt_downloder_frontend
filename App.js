@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   Image, ActivityIndicator, ScrollView, SafeAreaView,
-  Animated, StatusBar, Dimensions, Pressable, Platform,
+  Animated, StatusBar, Dimensions, Pressable, Platform, Alert,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
@@ -77,44 +77,43 @@ const Tag = ({ children }) => (
   <View style={st.tag}><Text style={st.tagText}>{children}</Text></View>
 );
 
-const Step = ({ n, label, active, done }) => (
-  <View style={st.stepRow}>
-    <View style={[st.stepDot, active && st.stepDotActive, done && st.stepDotDone]}>
-      {done
-        ? <Text style={st.stepCheck}>✓</Text>
-        : <Text style={[st.stepN, active && { color: T.white }]}>{n}</Text>}
-    </View>
-    <Text style={[st.stepLabel, (active || done) && { color: T.t1 }]}>{label}</Text>
-  </View>
-);
+// ── IMPROVED Permission helpers ────────────────────────────────
+async function checkMediaLibraryPermission() {
+  try {
+    const { status, canAskAgain } = await MediaLibrary.getPermissionsAsync();
+    console.log('Permission status:', status, 'canAskAgain:', canAskAgain);
+    return { status, canAskAgain };
+  } catch (e) {
+    console.error('Error checking permission:', e);
+    return { status: 'undetermined', canAskAgain: true };
+  }
+}
 
-// ── Permission helpers ────────────────────────────────────────
-// We only ever write into our own app sandbox and hand files to
-// MediaLibrary — so MediaLibrary's own permission is all we need.
-// No more MANAGE_EXTERNAL_STORAGE / raw path access required.
-async function requestStoragePermission() {
+async function requestMediaPermission() {
   try {
     const { status } = await MediaLibrary.requestPermissionsAsync();
+    console.log('After request, status:', status);
     return status === 'granted';
-  } catch {
+  } catch (e) {
+    console.error('Error requesting permission:', e);
     return false;
   }
 }
 
-async function openStorageSettings() {
+async function openAppSettings() {
   try {
-    await IntentLauncher.startActivityAsync(
-      'android.settings.APPLICATION_DETAILS_SETTINGS',
-      { data: 'package:com.zeeshan.videodownloader' }
-    );
-  } catch {}
+    if (Platform.OS === 'android') {
+      await IntentLauncher.startActivityAsync(
+        IntentLauncher.ACTION_APPLICATION_DETAILS_SETTINGS,
+        { data: 'package:com.zeeshan.videodownloader' }
+      );
+    }
+  } catch (e) {
+    console.error('Error opening settings:', e);
+  }
 }
 
-// Modern Android (Scoped Storage) blocks direct writes to /storage/emulated/0/Download
-// from FileSystem.downloadAsync even with MANAGE_EXTERNAL_STORAGE granted.
-// Reliable pattern: download into the app's own sandbox (always writable),
-// then hand the file to MediaLibrary, which has the proper API to place it
-// in the public Downloads/Movies collection.
+// Sandbox directory for downloads
 const SANDBOX_DIR = FileSystem.cacheDirectory + 'video-downloader/';
 
 async function ensureSandboxDir() {
@@ -123,8 +122,10 @@ async function ensureSandboxDir() {
     if (!info.exists) {
       await FileSystem.makeDirectoryAsync(SANDBOX_DIR, { intermediates: true });
     }
+    return true;
   } catch (e) {
-    console.warn('Could not create sandbox dir:', e.message);
+    console.error('Could not create sandbox dir:', e);
+    return false;
   }
 }
 
@@ -137,8 +138,8 @@ export default function App() {
   const [error, setError]         = useState('');
   const [success, setSuccess]     = useState('');
   const [dlState, setDlState]     = useState('idle');
-  const [hasPermission, setHasPermission] = useState(false);
-  const [checkingPerm, setCheckingPerm]   = useState(true);
+  const [permStatus, setPermStatus] = useState('checking'); // 'checking' | 'granted' | 'denied' | 'blocked'
+  const [debugInfo, setDebugInfo] = useState('');
 
   const headerAnim  = useRef(new Animated.Value(0)).current;
   const cardAnim    = useRef(new Animated.Value(0)).current;
@@ -151,22 +152,45 @@ export default function App() {
   useEffect(() => {
     Animated.timing(headerAnim, { toValue: 1, duration: 600, delay: 150, useNativeDriver: true }).start();
 
-    // Hard cap: spinner never shows more than 2.5s
+    // Hard cap: spinner never shows more than 3s
     spinTimer.current = setTimeout(() => {
-      setCheckingPerm(false);
-    }, 2500);
+      setPermStatus(prev => prev === 'checking' ? 'denied' : prev);
+    }, 3000);
 
-    doPermCheck();
+    checkInitialPermission();
 
     return () => clearTimeout(spinTimer.current);
   }, []);
 
-  const doPermCheck = async () => {
-    const granted = await requestStoragePermission();
-    clearTimeout(spinTimer.current);
-    setHasPermission(granted);
-    setCheckingPerm(false);
-    if (granted) ensureSandboxDir();
+  const checkInitialPermission = async () => {
+    try {
+      const { status, canAskAgain } = await checkMediaLibraryPermission();
+      clearTimeout(spinTimer.current);
+      
+      if (status === 'granted') {
+        setPermStatus('granted');
+        await ensureSandboxDir();
+      } else if (status === 'denied' && !canAskAgain) {
+        setPermStatus('blocked');
+      } else {
+        setPermStatus('denied');
+      }
+    } catch (e) {
+      console.error('Initial permission check failed:', e);
+      setPermStatus('denied');
+    }
+  };
+
+  const handleRequestPermission = async () => {
+    const granted = await requestMediaPermission();
+    if (granted) {
+      setPermStatus('granted');
+      await ensureSandboxDir();
+    } else {
+      // Check if we can ask again
+      const { canAskAgain } = await checkMediaLibraryPermission();
+      setPermStatus(canAskAgain ? 'denied' : 'blocked');
+    }
   };
 
   const showCard = () => {
@@ -219,16 +243,23 @@ export default function App() {
     setError(''); setSuccess('');
 
     // Re-check permission right before download
-    const hasPerm = await requestStoragePermission();
-    if (!hasPerm) {
-      setHasPermission(false);
-      return;
+    const { status } = await checkMediaLibraryPermission();
+    if (status !== 'granted') {
+      const granted = await requestMediaPermission();
+      if (!granted) {
+        setPermStatus('denied');
+        setError('Permission required to save videos. Please allow access.');
+        return;
+      }
     }
 
     setDlQuality(quality); setDlState('downloading'); startPulse();
 
     try {
-      await ensureSandboxDir();
+      const dirReady = await ensureSandboxDir();
+      if (!dirReady) {
+        throw new Error('Could not prepare storage for download');
+      }
 
       const sanitized = (info.title || 'video').replace(/[^a-z0-9]/gi, '_').toLowerCase().slice(0, 60);
       const ext       = quality === 'audio' ? 'mp3' : 'mp4';
@@ -236,18 +267,41 @@ export default function App() {
       const sandboxPath = SANDBOX_DIR + filename;
       const dlUrl     = `${BACKEND_URL}/download-video?url=${encodeURIComponent(url)}&quality=${encodeURIComponent(quality)}`;
 
-      // Step 1: download into the app's private sandbox (always writable, no permission issues)
+      console.log('Downloading to sandbox:', sandboxPath);
+
+      // Step 1: Download into app's private sandbox
       const result = await FileSystem.downloadAsync(dlUrl, sandboxPath);
 
       if (result.status !== 200) {
-        setError(`Download failed (HTTP ${result.status}). Try a different quality.`);
-        setDlState('idle');
-        return;
+        // Clean up failed download
+        try { await FileSystem.deleteAsync(sandboxPath, { idempotent: true }); } catch {}
+        throw new Error(`Download failed (HTTP ${result.status}). Try a different quality.`);
       }
 
-      // Step 2: hand the file to MediaLibrary, which knows how to place it
-      // in the public Downloads/Movies collection under modern Scoped Storage.
-      const asset = await MediaLibrary.createAssetAsync(sandboxPath);
+      // Verify file exists and has content
+      const fileInfo = await FileSystem.getInfoAsync(sandboxPath);
+      if (!fileInfo.exists || fileInfo.size === 0) {
+        throw new Error('Downloaded file is empty or missing');
+      }
+
+      console.log('File downloaded successfully, size:', fileInfo.size, 'bytes');
+
+      // Step 2: Save to MediaLibrary (gallery)
+      let asset;
+      try {
+        asset = await MediaLibrary.createAssetAsync(sandboxPath);
+        console.log('Asset created successfully:', asset.uri);
+      } catch (assetErr) {
+        console.error('createAssetAsync failed:', assetErr);
+        // On some devices, try with a different approach
+        // Copy to document directory first
+        const docPath = FileSystem.documentDirectory + filename;
+        await FileSystem.copyAsync({ from: sandboxPath, to: docPath });
+        asset = await MediaLibrary.createAssetAsync(docPath);
+        try { await FileSystem.deleteAsync(docPath, { idempotent: true }); } catch {}
+      }
+
+      // Step 3: Add to album (non-critical)
       try {
         let album = await MediaLibrary.getAlbumAsync('VideoDownloader');
         if (album == null) {
@@ -256,23 +310,33 @@ export default function App() {
           await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
         }
       } catch (albumErr) {
-        // Asset is still saved to the gallery even if album creation fails
-        console.warn('Album step failed, file still saved:', albumErr.message);
+        console.warn('Album step failed (non-critical):', albumErr.message);
       }
 
-      // Step 3: clean up the sandbox copy now that MediaLibrary has its own copy
+      // Step 4: Clean up sandbox
       try { await FileSystem.deleteAsync(sandboxPath, { idempotent: true }); } catch {}
 
       setDlState('done');
       Animated.spring(successAnim, { toValue: 1, speed: 14, useNativeDriver: true }).start();
-      setSuccess('Saved to your Gallery, album "VideoDownloader"');
+      setSuccess('Saved to your Gallery → VideoDownloader album');
       setTimeout(() => { successAnim.setValue(0); reset(); }, 3500);
 
     } catch (e) {
       console.error('Download error:', e);
-      setError(e.message?.includes('permission')
-        ? 'Storage permission denied. Please grant "All files access" in settings.'
-        : (e.message || 'Something went wrong. Try again.'));
+      
+      let errorMsg = e.message || 'Something went wrong. Try again.';
+      
+      // Provide more helpful error messages
+      if (errorMsg.toLowerCase().includes('permission')) {
+        errorMsg = 'Storage permission denied. Please grant access in Settings.';
+        setPermStatus('denied');
+      } else if (errorMsg.toLowerCase().includes('no space') || errorMsg.toLowerCase().includes('disk')) {
+        errorMsg = 'Not enough storage space on your device.';
+      } else if (errorMsg.toLowerCase().includes('network') || errorMsg.toLowerCase().includes('connect')) {
+        errorMsg = 'Network error. Check your internet connection.';
+      }
+      
+      setError(errorMsg);
       setDlState('idle');
     } finally {
       stopPulse(); setLoading(false); setDlQuality(null);
@@ -282,7 +346,7 @@ export default function App() {
   const isDownloading = dlState === 'downloading';
 
   // ── Loading screen ────────────────────────────────────────
-  if (checkingPerm) return (
+  if (permStatus === 'checking') return (
     <SafeAreaView style={st.safe}>
       <StatusBar barStyle="light-content" backgroundColor={T.bg} />
       <View style={st.center}>
@@ -296,8 +360,8 @@ export default function App() {
     </SafeAreaView>
   );
 
-  // ── Permission screen ────────────────────────────────────────
-  if (!hasPermission) return (
+  // ── Permission screen (denied but can ask again) ──────────
+  if (permStatus === 'denied') return (
     <SafeAreaView style={st.safe}>
       <StatusBar barStyle="light-content" backgroundColor={T.bg} />
       <ScrollView contentContainerStyle={st.permScroll} showsVerticalScrollIndicator={false}>
@@ -312,12 +376,42 @@ export default function App() {
           Video Downloader needs permission to save videos to your gallery. Tap below to allow it.
         </Text>
 
-        <TouchableOpacity style={st.accentBtn} onPress={doPermCheck} activeOpacity={0.85}>
+        <TouchableOpacity style={st.accentBtn} onPress={handleRequestPermission} activeOpacity={0.85}>
           <Text style={st.accentBtnText}>Allow Access</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={st.ghostBtn} onPress={openStorageSettings} activeOpacity={0.7}>
-          <Text style={st.ghostBtnText}>Already denied? Open app settings →</Text>
+        <TouchableOpacity style={st.ghostBtn} onPress={openAppSettings} activeOpacity={0.7}>
+          <Text style={st.ghostBtnText}>Open app settings instead →</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    </SafeAreaView>
+  );
+
+  // ── Permission blocked (need to go to settings) ──────────
+  if (permStatus === 'blocked') return (
+    <SafeAreaView style={st.safe}>
+      <StatusBar barStyle="light-content" backgroundColor={T.bg} />
+      <ScrollView contentContainerStyle={st.permScroll} showsVerticalScrollIndicator={false}>
+        <View style={st.orbBig} />
+
+        <View style={st.permIconWrap}>
+          <Text style={{ fontSize: 28 }}>🔒</Text>
+        </View>
+
+        <Text style={st.permTitle}>Permission blocked</Text>
+        <Text style={st.permDesc}>
+          You previously denied permission. To save videos, you'll need to manually enable it in your device settings.
+        </Text>
+
+        <TouchableOpacity style={st.accentBtn} onPress={openAppSettings} activeOpacity={0.85}>
+          <Text style={st.accentBtnText}>Open App Settings</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={st.ghostBtn} onPress={() => {
+          // Try requesting again just in case
+          handleRequestPermission();
+        }} activeOpacity={0.7}>
+          <Text style={st.ghostBtnText}>Try requesting again →</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
@@ -478,13 +572,12 @@ export default function App() {
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────
+// ── Styles (same as before) ────────────────────────────────────
 const st = StyleSheet.create({
   safe:   { flex: 1, backgroundColor: T.bg },
   scroll: { padding: 20, paddingBottom: 72 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: T.bg },
 
-  // Loader
   loaderWrap: { alignItems: 'center', gap: 16 },
   loaderRing: {
     width: 60, height: 60, borderRadius: 30,
@@ -494,7 +587,6 @@ const st = StyleSheet.create({
   },
   loaderText: { fontSize: 13, color: T.t2, letterSpacing: 0.5 },
 
-  // Glow
   ambientGlow: {
     position: 'absolute', top: -80, left: SW / 2 - 100,
     width: 200, height: 200, borderRadius: 100,
@@ -506,7 +598,6 @@ const st = StyleSheet.create({
     backgroundColor: T.accent, opacity: 0.07,
   },
 
-  // Permission
   permScroll:  { padding: 28, alignItems: 'center', paddingTop: 70, paddingBottom: 52 },
   permIconWrap: {
     width: 72, height: 72, borderRadius: 22,
@@ -516,25 +607,6 @@ const st = StyleSheet.create({
   permTitle: { fontSize: 26, fontWeight: '800', color: T.t1, marginBottom: 10, textAlign: 'center', letterSpacing: -0.4 },
   permDesc:  { fontSize: 14, color: T.t2, textAlign: 'center', lineHeight: 22, marginBottom: 28, paddingHorizontal: 8 },
 
-  stepsWrap: {
-    width: '100%', backgroundColor: T.glass,
-    borderRadius: 16, borderWidth: 1, borderColor: T.border,
-    padding: 18, marginBottom: 26,
-  },
-  stepRow:       { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  stepDot:       {
-    width: 26, height: 26, borderRadius: 13,
-    backgroundColor: T.surface, borderWidth: 1, borderColor: T.border,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  stepDotActive: { backgroundColor: T.accentSoft, borderColor: T.accent },
-  stepDotDone:   { backgroundColor: T.accent, borderColor: T.accent },
-  stepN:         { fontSize: 11, fontWeight: '700', color: T.t3 },
-  stepCheck:     { fontSize: 11, fontWeight: '800', color: T.white },
-  stepLabel:     { fontSize: 13, color: T.t2, flex: 1, lineHeight: 19 },
-  stepLine:      { width: 1, height: 14, backgroundColor: T.border, marginLeft: 12, marginVertical: 4 },
-
-  // Buttons
   accentBtn: {
     backgroundColor: T.accent, borderRadius: 13,
     paddingVertical: 15, alignItems: 'center', justifyContent: 'center',
@@ -546,7 +618,6 @@ const st = StyleSheet.create({
   ghostBtn:      { paddingVertical: 12, alignItems: 'center', width: '100%' },
   ghostBtnText:  { color: T.t2, fontSize: 13, fontWeight: '600' },
 
-  // Header
   header:       { flexDirection: 'row', alignItems: 'center', marginTop: 4, marginBottom: 24, gap: 14 },
   logoMark:     {
     width: 46, height: 46, borderRadius: 14,
@@ -558,7 +629,6 @@ const st = StyleSheet.create({
   appName:      { fontSize: 20, fontWeight: '800', color: T.t1, letterSpacing: -0.3 },
   appSub:       { fontSize: 11, color: T.t2, marginTop: 2, letterSpacing: 0.2 },
 
-  // Search card
   searchCard: {
     backgroundColor: T.card, borderRadius: 18,
     borderWidth: 1, borderColor: T.border,
@@ -574,7 +644,6 @@ const st = StyleSheet.create({
   input:     { flex: 1, fontSize: 13.5, color: T.t1, padding: 0 },
   clearBtn:  { fontSize: 12, color: T.t2, padding: 2 },
 
-  // Chips
   chip:     {
     backgroundColor: T.glass, borderRadius: 20,
     borderWidth: 1, borderColor: T.border,
@@ -582,7 +651,6 @@ const st = StyleSheet.create({
   },
   chipText: { fontSize: 11, color: T.t2, fontWeight: '600' },
 
-  // Error
   errorBox: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 10,
     backgroundColor: T.redSoft, borderWidth: 1, borderColor: T.red + '28',
@@ -591,7 +659,6 @@ const st = StyleSheet.create({
   errorIcon: { fontSize: 13, color: T.red, marginTop: 1 },
   errorText: { color: T.red, fontSize: 13.5, flex: 1, lineHeight: 20 },
 
-  // Success
   successBox: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     backgroundColor: T.greenSoft, borderWidth: 1, borderColor: T.green + '30',
@@ -601,7 +668,6 @@ const st = StyleSheet.create({
   successTitle: { fontSize: 14, fontWeight: '700', color: T.green, marginBottom: 2 },
   successSub:   { fontSize: 11.5, color: T.green, opacity: 0.75 },
 
-  // Video card
   videoCard: {
     backgroundColor: T.card, borderRadius: 18,
     borderWidth: 1, borderColor: T.border,
@@ -609,18 +675,13 @@ const st = StyleSheet.create({
   },
   thumbWrap:    { position: 'relative' },
   thumb:        { width: '100%', height: 200 },
-  thumbOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#07090FBB',
-    // gradient effect via bottom-heavy opacity
-  },
+  thumbOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: '#07090FBB' },
   thumbBottom: {
     position: 'absolute', bottom: 0, left: 0, right: 0, padding: 14,
     backgroundColor: '#080910CC',
   },
   thumbTitleText: { fontSize: 14.5, fontWeight: '700', color: T.t1, lineHeight: 21, marginTop: 7 },
 
-  // Quality
   qualSection:    { padding: 16 },
   qualHeader:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
   qualHeading:    { fontSize: 11, fontWeight: '700', color: T.t1, letterSpacing: 1, textTransform: 'uppercase' },
@@ -633,7 +694,6 @@ const st = StyleSheet.create({
   qualLabel: { fontSize: 14.5, fontWeight: '800', letterSpacing: -0.2 },
   qualSub:   { fontSize: 10.5, color: T.t2, fontWeight: '500' },
 
-  // Download bar
   dlBar: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     margin: 16, marginTop: 0,
@@ -643,15 +703,12 @@ const st = StyleSheet.create({
   dlBarTitle: { fontSize: 13, fontWeight: '700', color: T.accent },
   dlBarSub:   { fontSize: 11, color: T.t2, marginTop: 1 },
 
-  // Reset
   resetBtn:     { alignItems: 'center', paddingVertical: 14, borderTopWidth: 1, borderTopColor: T.border },
   resetBtnText: { fontSize: 13, color: T.t2, fontWeight: '600' },
 
-  // Tag
   tag:     { alignSelf: 'flex-start', backgroundColor: '#000000AA', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
   tagText: { color: T.white, fontSize: 10.5, fontWeight: '700', letterSpacing: 0.5 },
 
-  // Signature
   sig:        { alignItems: 'center', marginTop: 40, paddingBottom: 8 },
   sigDivider: { width: 28, height: 1, backgroundColor: T.border, marginBottom: 14 },
   sigBy:      { fontSize: 9.5, letterSpacing: 2.5, color: T.t3, textTransform: 'uppercase', marginBottom: 5 },
