@@ -4,6 +4,34 @@
     "slug": "video-downloader",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#080910"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.zeeshan.videodownloader",
+      "infoPlist": {
+        "NSPhotoLibraryAddUsageDescription": "Video Downloader needs access to save videos to your Photos.",
+        "NSPhotoLibraryUsageDescription": "Video Downloader needs access to read and save videos to your Photos."
+      },
+      "buildNumber": "1"
+    },
+    "android": {
+      "package": "com.zeeshan.videodownloader",
+      "adaptiveIcon": {
+        "backgroundColor": "#080910"
+      },
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_AUDIO"
+      ],
+      "versionCode": 1
+    },
     "plugins": [
       [
         "expo-media-library",
@@ -18,24 +46,6 @@
           "filesystemAllowEscalation": true
         }
       ]
-    ],
-    "android": {
-      "permissions": [
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
-        "READ_MEDIA_VIDEO",
-        "READ_MEDIA_IMAGES",
-        "READ_MEDIA_AUDIO"
-      ],
-      "package": "com.zeeshan.videodownloader",
-      "adaptiveIcon": {
-        "backgroundColor": "#080910"
-      }
-    },
-    "ios": {
-      "infoPlist": {
-        "NSPhotoLibraryAddUsageDescription": "Allow Video Downloader to save videos to your gallery."
-      }
-    }
+    ]
   }
 }

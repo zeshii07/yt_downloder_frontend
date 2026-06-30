@@ -2,11 +2,17 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   Image, ActivityIndicator, ScrollView, SafeAreaView,
-  Animated, StatusBar, Dimensions, Pressable, Platform, Alert,
+  Animated, StatusBar, Dimensions, Pressable, Platform,
+  Linking,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as IntentLauncher from 'expo-intent-launcher';
 import * as MediaLibrary from 'expo-media-library';
+
+// Only import IntentLauncher on Android
+let IntentLauncher;
+if (Platform.OS === 'android') {
+  IntentLauncher = require('expo-intent-launcher');
+}
 
 const BACKEND_URL = 'https://ytdownlodbackend-production.up.railway.app';
 const { width: SW } = Dimensions.get('window');
@@ -77,7 +83,7 @@ const Tag = ({ children }) => (
   <View style={st.tag}><Text style={st.tagText}>{children}</Text></View>
 );
 
-// ── IMPROVED Permission helpers ────────────────────────────────
+// ── Cross-Platform Permission Helpers ──────────────────────────
 async function checkMediaLibraryPermission() {
   try {
     const { status, canAskAgain } = await MediaLibrary.getPermissionsAsync();
@@ -100,6 +106,7 @@ async function requestMediaPermission() {
   }
 }
 
+// ✅ Cross-platform settings opener
 async function openAppSettings() {
   try {
     if (Platform.OS === 'android') {
@@ -107,9 +114,20 @@ async function openAppSettings() {
         IntentLauncher.ACTION_APPLICATION_DETAILS_SETTINGS,
         { data: 'package:com.zeeshan.videodownloader' }
       );
+    } else {
+      // iOS: Open app settings via URL scheme
+      await Linking.openURL('app-settings:');
     }
   } catch (e) {
     console.error('Error opening settings:', e);
+    // Fallback for iOS if app-settings: doesn't work
+    if (Platform.OS === 'ios') {
+      try {
+        await Linking.openURL('prefs:root=Photos');
+      } catch (fallbackErr) {
+        console.error('Fallback settings also failed:', fallbackErr);
+      }
+    }
   }
 }
 
@@ -138,8 +156,7 @@ export default function App() {
   const [error, setError]         = useState('');
   const [success, setSuccess]     = useState('');
   const [dlState, setDlState]     = useState('idle');
-  const [permStatus, setPermStatus] = useState('checking'); // 'checking' | 'granted' | 'denied' | 'blocked'
-  const [debugInfo, setDebugInfo] = useState('');
+  const [permStatus, setPermStatus] = useState('checking');
 
   const headerAnim  = useRef(new Animated.Value(0)).current;
   const cardAnim    = useRef(new Animated.Value(0)).current;
@@ -152,7 +169,6 @@ export default function App() {
   useEffect(() => {
     Animated.timing(headerAnim, { toValue: 1, duration: 600, delay: 150, useNativeDriver: true }).start();
 
-    // Hard cap: spinner never shows more than 3s
     spinTimer.current = setTimeout(() => {
       setPermStatus(prev => prev === 'checking' ? 'denied' : prev);
     }, 3000);
@@ -187,7 +203,6 @@ export default function App() {
       setPermStatus('granted');
       await ensureSandboxDir();
     } else {
-      // Check if we can ask again
       const { canAskAgain } = await checkMediaLibraryPermission();
       setPermStatus(canAskAgain ? 'denied' : 'blocked');
     }
@@ -242,7 +257,6 @@ export default function App() {
   const handleDownload = async (quality) => {
     setError(''); setSuccess('');
 
-    // Re-check permission right before download
     const { status } = await checkMediaLibraryPermission();
     if (status !== 'granted') {
       const granted = await requestMediaPermission();
@@ -269,39 +283,35 @@ export default function App() {
 
       console.log('Downloading to sandbox:', sandboxPath);
 
-      // Step 1: Download into app's private sandbox
       const result = await FileSystem.downloadAsync(dlUrl, sandboxPath);
 
       if (result.status !== 200) {
-        // Clean up failed download
         try { await FileSystem.deleteAsync(sandboxPath, { idempotent: true }); } catch {}
         throw new Error(`Download failed (HTTP ${result.status}). Try a different quality.`);
       }
 
-      // Verify file exists and has content
       const fileInfo = await FileSystem.getInfoAsync(sandboxPath);
       if (!fileInfo.exists || fileInfo.size === 0) {
         throw new Error('Downloaded file is empty or missing');
       }
 
-      console.log('File downloaded successfully, size:', fileInfo.size, 'bytes');
+      console.log('File downloaded, size:', fileInfo.size, 'bytes');
 
-      // Step 2: Save to MediaLibrary (gallery)
+      // Save to MediaLibrary
       let asset;
       try {
         asset = await MediaLibrary.createAssetAsync(sandboxPath);
-        console.log('Asset created successfully:', asset.uri);
+        console.log('Asset created:', asset.uri);
       } catch (assetErr) {
         console.error('createAssetAsync failed:', assetErr);
-        // On some devices, try with a different approach
-        // Copy to document directory first
+        // Fallback: copy to document directory
         const docPath = FileSystem.documentDirectory + filename;
         await FileSystem.copyAsync({ from: sandboxPath, to: docPath });
         asset = await MediaLibrary.createAssetAsync(docPath);
         try { await FileSystem.deleteAsync(docPath, { idempotent: true }); } catch {}
       }
 
-      // Step 3: Add to album (non-critical)
+      // Add to album (non-critical)
       try {
         let album = await MediaLibrary.getAlbumAsync('VideoDownloader');
         if (album == null) {
@@ -313,12 +323,18 @@ export default function App() {
         console.warn('Album step failed (non-critical):', albumErr.message);
       }
 
-      // Step 4: Clean up sandbox
+      // Cleanup
       try { await FileSystem.deleteAsync(sandboxPath, { idempotent: true }); } catch {}
 
       setDlState('done');
       Animated.spring(successAnim, { toValue: 1, speed: 14, useNativeDriver: true }).start();
-      setSuccess('Saved to your Gallery → VideoDownloader album');
+      
+      // Platform-specific success message
+      const albumMsg = Platform.OS === 'ios' 
+        ? 'Saved to Photos app → VideoDownloader album'
+        : 'Saved to Gallery → VideoDownloader album';
+      setSuccess(albumMsg);
+      
       setTimeout(() => { successAnim.setValue(0); reset(); }, 3500);
 
     } catch (e) {
@@ -326,14 +342,13 @@ export default function App() {
       
       let errorMsg = e.message || 'Something went wrong. Try again.';
       
-      // Provide more helpful error messages
       if (errorMsg.toLowerCase().includes('permission')) {
-        errorMsg = 'Storage permission denied. Please grant access in Settings.';
+        errorMsg = Platform.OS === 'ios'
+          ? 'Photo library permission denied. Please enable it in Settings → Privacy & Security.'
+          : 'Storage permission denied. Please grant access in Settings.';
         setPermStatus('denied');
       } else if (errorMsg.toLowerCase().includes('no space') || errorMsg.toLowerCase().includes('disk')) {
         errorMsg = 'Not enough storage space on your device.';
-      } else if (errorMsg.toLowerCase().includes('network') || errorMsg.toLowerCase().includes('connect')) {
-        errorMsg = 'Network error. Check your internet connection.';
       }
       
       setError(errorMsg);
@@ -373,7 +388,9 @@ export default function App() {
 
         <Text style={st.permTitle}>Allow media access</Text>
         <Text style={st.permDesc}>
-          Video Downloader needs permission to save videos to your gallery. Tap below to allow it.
+          {Platform.OS === 'ios'
+            ? 'Video Downloader needs permission to save videos to your Photos. Tap below to allow it.'
+            : 'Video Downloader needs permission to save videos to your gallery. Tap below to allow it.'}
         </Text>
 
         <TouchableOpacity style={st.accentBtn} onPress={handleRequestPermission} activeOpacity={0.85}>
@@ -381,13 +398,15 @@ export default function App() {
         </TouchableOpacity>
 
         <TouchableOpacity style={st.ghostBtn} onPress={openAppSettings} activeOpacity={0.7}>
-          <Text style={st.ghostBtnText}>Open app settings instead →</Text>
+          <Text style={st.ghostBtnText}>
+            {Platform.OS === 'ios' ? 'Open Settings instead →' : 'Open app settings instead →'}
+          </Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
   );
 
-  // ── Permission blocked (need to go to settings) ──────────
+  // ── Permission blocked ────────────────────────────────────
   if (permStatus === 'blocked') return (
     <SafeAreaView style={st.safe}>
       <StatusBar barStyle="light-content" backgroundColor={T.bg} />
@@ -400,17 +419,18 @@ export default function App() {
 
         <Text style={st.permTitle}>Permission blocked</Text>
         <Text style={st.permDesc}>
-          You previously denied permission. To save videos, you'll need to manually enable it in your device settings.
+          {Platform.OS === 'ios'
+            ? 'You previously denied permission. Go to Settings → Privacy & Security → Photos to enable it.'
+            : 'You previously denied permission. To save videos, enable it in your device settings.'}
         </Text>
 
         <TouchableOpacity style={st.accentBtn} onPress={openAppSettings} activeOpacity={0.85}>
-          <Text style={st.accentBtnText}>Open App Settings</Text>
+          <Text style={st.accentBtnText}>
+            {Platform.OS === 'ios' ? 'Open Privacy Settings' : 'Open App Settings'}
+          </Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={st.ghostBtn} onPress={() => {
-          // Try requesting again just in case
-          handleRequestPermission();
-        }} activeOpacity={0.7}>
+        <TouchableOpacity style={st.ghostBtn} onPress={handleRequestPermission} activeOpacity={0.7}>
           <Text style={st.ghostBtnText}>Try requesting again →</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -477,7 +497,6 @@ export default function App() {
               : <Text style={st.accentBtnText}>Fetch Video Info</Text>}
           </TouchableOpacity>
 
-          {/* Platform chips */}
           {!info && !loading && (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 4 }} contentContainerStyle={{ gap: 8 }}>
               {['YouTube', 'Instagram', 'TikTok', 'Twitter/X', 'Facebook', 'Reddit', 'Vimeo'].map(p => (
@@ -489,7 +508,6 @@ export default function App() {
           )}
         </View>
 
-        {/* ── Error ── */}
         {!!error && (
           <View style={st.errorBox}>
             <Text style={st.errorIcon}>⚠</Text>
@@ -497,7 +515,6 @@ export default function App() {
           </View>
         )}
 
-        {/* ── Success ── */}
         {!!success && (
           <Animated.View style={[st.successBox, {
             transform: [{ scale: successAnim.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) }],
@@ -511,11 +528,8 @@ export default function App() {
           </Animated.View>
         )}
 
-        {/* ── Video card ── */}
         {info && (
           <Animated.View style={[st.videoCard, { opacity: cardAnim, transform: [{ translateY: cardSlide }] }]}>
-
-            {/* Thumbnail */}
             {info.thumbnail && (
               <View style={st.thumbWrap}>
                 <Image source={{ uri: info.thumbnail }} style={st.thumb} resizeMode="cover" />
@@ -527,7 +541,6 @@ export default function App() {
               </View>
             )}
 
-            {/* Quality grid */}
             <View style={st.qualSection}>
               <View style={st.qualHeader}>
                 <Text style={st.qualHeading}>Choose quality</Text>
@@ -542,7 +555,6 @@ export default function App() {
               </View>
             </View>
 
-            {/* Download progress */}
             {isDownloading && (
               <Animated.View style={[st.dlBar, { opacity: pulseAnim }]}>
                 <ActivityIndicator color={T.accent} size="small" />
@@ -553,14 +565,12 @@ export default function App() {
               </Animated.View>
             )}
 
-            {/* Back */}
             <TouchableOpacity style={st.resetBtn} onPress={reset} disabled={isDownloading}>
               <Text style={st.resetBtnText}>← Try another link</Text>
             </TouchableOpacity>
           </Animated.View>
         )}
 
-        {/* ── Signature ── */}
         <View style={st.sig}>
           <View style={st.sigDivider} />
           <Text style={st.sigBy}>crafted with ♥ by</Text>
@@ -572,7 +582,7 @@ export default function App() {
   );
 }
 
-// ── Styles (same as before) ────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────
 const st = StyleSheet.create({
   safe:   { flex: 1, backgroundColor: T.bg },
   scroll: { padding: 20, paddingBottom: 72 },
